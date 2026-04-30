@@ -1,0 +1,1004 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Highly Available, Secure Multi-AZ VPC Lab Author: [Your Full Name] Lab: AWS VPC High Availability Lab Description: Demonstrates fault-tolerant network design, controlled internet access, and secure EC2 instance management using AWS Systems Manager Session Manager. Spans two Availability Zones with redundant public/private subnets, dual NAT Gateways, Apache web tier, and private application tier. No SSH access — SSM only.
+
+# METADATA — CloudFormation Console UI Grouping
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+    - Label:
+        default: "Network Configuration"
+      Parameters:
+      - VpcCidr
+      - PublicSubnet1Cidr
+      - PublicSubnet2Cidr
+      - PrivateSubnet1Cidr
+      - PrivateSubnet2Cidr
+    - Label:
+        default: "EC2 Configuration"
+      Parameters:
+      - InstanceType
+      - LatestAmiId
+    - Label:
+        default: "Identification"
+      Parameters:
+      - StudentName
+      - LabName
+      - ProjectTag
+    ParameterLabels:
+      VpcCidr:
+        default: "VPC CIDR Block"
+      StudentName:
+        default: "Mohammed Abdul Basit"
+      LabName:
+        default: "Secure Multi-AZ VPC Lab"
+
+# PARAMETERS — Configurable inputs; change these to customise the stack
+Parameters:
+
+  # ---- Network CIDRs ----
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: CIDR block for the VPC (must be /16 to /28)
+    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: CIDR for Public Subnet in AZ-1
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: CIDR for Public Subnet in AZ-2
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: "10.0.11.0/24"
+    Description: CIDR for Private Subnet in AZ-1
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: "10.0.12.0/24"
+    Description: CIDR for Private Subnet in AZ-2
+
+  # ---- EC2 Configuration ----
+  InstanceType:
+    Type: String
+    Default: "t3.micro"
+    Description: EC2 instance type for all instances
+    AllowedValues:
+    - t3.micro
+    - t3.small
+    - t3.medium
+    - t2.micro
+
+  # SSM Parameter Store path for the latest Amazon Linux 2023 AMI — auto-updates
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI (resolved via SSM Parameter Store)
+
+  # ---- Identification / Tagging ----
+  StudentName:
+    Type: String
+    Default: "Mohammed Abdul Basit"
+    Description: Student full name — displayed on the Apache web page
+
+  LabName:
+    Type: String
+    Default: "AWS VPC High Availability Lab"
+    Description: Lab name — displayed on the Apache web page
+
+  ProjectTag:
+    Type: String
+    Default: "vpc-ha-lab"
+    Description: Tag value applied to all resources for cost tracking
+
+# RESOURCES
+Resources:
+
+  # 1. VPC — The isolated network boundary
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true # Required for SSM endpoints to resolve
+      EnableDnsHostnames: true # Required for SSM endpoints to resolve
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-vpc"
+      - Key: Project
+        Value: !Ref ProjectTag
+      - Key: ManagedBy
+        Value: CloudFormation
+
+  # 2. INTERNET GATEWAY — Allows public subnets to reach the internet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-igw"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # Attach the IGW to our VPC — without this attachment the IGW is inert
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # 3. SUBNETS — Two public + two private, one of each per AZ
+  #    AZ-1 → Subnet 1 resources
+  #    AZ-2 → Subnet 2 resources
+
+  # ---- Public Subnet — AZ 1 ----
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      # Fn::Select + GetAZs dynamically picks the first AZ in the current region
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true # Instances launched here receive a public IP
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-public-subnet-az1"
+      - Key: Tier
+        Value: Public
+      - Key: AZ
+        Value: AZ1
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # ---- Public Subnet — AZ 2 ----
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-public-subnet-az2"
+      - Key: Tier
+        Value: Public
+      - Key: AZ
+        Value: AZ2
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # ---- Private Subnet — AZ 1 ----
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: false # Private instances must NOT receive public IPs
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-private-subnet-az1"
+      - Key: Tier
+        Value: Private
+      - Key: AZ
+        Value: AZ1
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # ---- Private Subnet — AZ 2 ----
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-private-subnet-az2"
+      - Key: Tier
+        Value: Private
+      - Key: AZ
+        Value: AZ2
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # 4. ELASTIC IPs — Static public IPs for NAT Gateways
+  #    EIPs must be created before the NAT Gateways that use them
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment # EIP needs IGW attached first
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-nat-eip-az1"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-nat-eip-az2"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # 5. NAT GATEWAYS — One per AZ for HA; placed in PUBLIC subnets
+  #
+  #    Design note: Each NAT Gateway lives in its own AZ's public subnet.
+  #    The private subnet in AZ-1 routes via NatGateway1 and the private subnet
+  #    in AZ-2 routes via NatGateway2. This eliminates cross-AZ NAT dependency —
+  #    if AZ-1 fails, AZ-2 private instances still reach the internet via their
+  #    own local NAT Gateway. This is the "AZ-scoped" NAT pattern.
+  #
+  #    Compare: AWS Regional NAT Gateway (announced 2024) is a single NAT GW
+  #    that AWS manages for HA internally — you pay for one but it spans AZs.
+  #    See docs/design-decisions.md for a full comparison.
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1 # NAT GW must be in a PUBLIC subnet
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-nat-gw-az1"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-nat-gw-az2"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # 6. ROUTE TABLES & ROUTES
+  #
+  #    Public RT  → default route to Internet Gateway (both public subnets share it)
+  #    Private RT1 → default route to NatGateway1 (AZ-1 private subnet only)
+  #    Private RT2 → default route to NatGateway2 (AZ-2 private subnet only)
+
+  # ---- Public Route Table ----
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-public-rt"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # Default route: all non-VPC traffic exits via the Internet Gateway
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  # Associate both public subnets with the public route table
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---- Private Route Table — AZ 1 ----
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-private-rt-az1"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # Egress-only route: private instances reach internet via local NAT GW (AZ-1)
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway1 # Always routes to AZ-1 NAT GW — no cross-AZ
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  # ---- Private Route Table — AZ 2 ----
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-private-rt-az2"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway2 # Always routes to AZ-2 NAT GW — no cross-AZ
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # 7. SECURITY GROUPS — Least-privilege; no SSH (port 22) anywhere
+
+  # ---- Web Tier Security Group (Public EC2 instances) ----
+  WebTierSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectTag}-web-sg"
+      GroupDescription: >
+        Web tier SG — allows HTTP from internet and ICMP from within VPC. No SSH. SSM access is handled via VPC endpoints (no inbound port needed).
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      # HTTP — allow browsers to reach Apache
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: "0.0.0.0/0"
+        Description: "HTTP inbound from internet"
+      # ICMP — allow ping from within the VPC (for validation exercises)
+      - IpProtocol: icmp
+        FromPort: -1 # -1 means all ICMP types
+        ToPort: -1
+        CidrIp: !Ref VpcCidr
+        Description: "ICMP (ping) from within VPC for network validation"
+      SecurityGroupEgress:
+      # Allow all outbound — instances need to reach package repos, SSM, etc.
+      - IpProtocol: -1
+        CidrIp: "0.0.0.0/0"
+        Description: "All outbound traffic allowed"
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-web-sg"
+      - Key: Tier
+        Value: WebTier
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # ---- App Tier Security Group (Private EC2 instances) ----
+  AppTierSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectTag}-app-sg"
+      GroupDescription: >
+        App tier SG — allows ICMP from within VPC only. No SSH. No inbound from internet. Outbound through NAT GW only.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      # ICMP — allow ping from within the VPC only
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref VpcCidr
+        Description: "ICMP (ping) from within VPC for validation"
+      SecurityGroupEgress:
+      # Allow all outbound — traffic exits via NAT Gateway (not direct internet)
+      - IpProtocol: -1
+        CidrIp: "0.0.0.0/0"
+        Description: "Outbound via NAT Gateway"
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-app-sg"
+      - Key: Tier
+        Value: AppTier
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # 8. IAM — Role and Instance Profile for SSM Session Manager
+  #
+  #    The AmazonSSMManagedInstanceCore policy allows:
+  #      - SSM Agent to call home to SSM service
+  #      - Session Manager to open interactive shell sessions
+  #      - Parameter Store and Run Command (for future use)
+  #    No SSH key pair is used anywhere — all access is via SSM.
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectTag}-ec2-ssm-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com # Only EC2 may assume this role
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      # AWS managed policy — grants full SSM Session Manager capabilities
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-ec2-ssm-role"
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # Instance profile wraps the IAM role so EC2 instances can reference it
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ProjectTag}-ec2-instance-profile"
+      Roles:
+      - !Ref EC2SSMRole
+
+  # 9. EC2 INSTANCES — Web Tier (Public, Apache)
+
+  # ---- Web Server — AZ 1 ----
+  WebInstance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet1
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+      - !Ref WebTierSecurityGroup
+      # No KeyName property — SSH is intentionally disabled
+      UserData:
+        # UserData must be Base64-encoded; Fn::Base64 handles this
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # ============================================================
+          # User Data Script — Web Server AZ-1
+          # Runs as root at first boot
+          # ============================================================
+          set -euxo pipefail
+          exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
+
+          # Update system packages
+          dnf update -y
+
+          # Install Apache HTTP Server
+          dnf install -y httpd
+
+          # Determine the instance's AZ for display purposes
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/instance-id)
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          LOCAL_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/local-ipv4)
+          PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/public-ipv4)
+
+          # Write the HTML page
+          cat > /var/www/html/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+            <title>VPC Lab — Web Server</title>
+            <style>
+              @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+              *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+              body {
+                font-family: 'IBM Plex Sans', sans-serif;
+                background: #0a0f1e;
+                color: #e2e8f0;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 2rem;
+              }
+              .card {
+                background: linear-gradient(135deg, #111827 0%, #1e293b 100%);
+                border: 1px solid #334155;
+                border-radius: 16px;
+                padding: 3rem;
+                max-width: 640px;
+                width: 100%;
+                box-shadow: 0 25px 50px rgba(0,0,0,0.5), 0 0 0 1px rgba(99,102,241,0.1);
+              }
+              .badge {
+                display: inline-block;
+                background: #4f46e5;
+                color: #e0e7ff;
+                font-family: 'Space Mono', monospace;
+                font-size: 0.7rem;
+                letter-spacing: 0.15em;
+                text-transform: uppercase;
+                padding: 0.3rem 0.8rem;
+                border-radius: 999px;
+                margin-bottom: 1.5rem;
+              }
+              h1 {
+                font-family: 'Space Mono', monospace;
+                font-size: 1.6rem;
+                font-weight: 700;
+                color: #fff;
+                line-height: 1.2;
+                margin-bottom: 0.5rem;
+              }
+              .lab-name {
+                color: #818cf8;
+                font-size: 1rem;
+                font-weight: 300;
+                margin-bottom: 2rem;
+                letter-spacing: 0.02em;
+              }
+              .divider {
+                border: none;
+                border-top: 1px solid #1e40af33;
+                margin: 1.5rem 0;
+              }
+              .meta-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 1rem;
+              }
+              .meta-item {
+                background: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                padding: 0.75rem 1rem;
+              }
+              .meta-label {
+                font-family: 'Space Mono', monospace;
+                font-size: 0.65rem;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                color: #64748b;
+                margin-bottom: 0.25rem;
+              }
+              .meta-value {
+                font-family: 'Space Mono', monospace;
+                font-size: 0.85rem;
+                color: #38bdf8;
+                word-break: break-all;
+              }
+              .status {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                margin-top: 1.5rem;
+                color: #4ade80;
+                font-size: 0.85rem;
+              }
+              .dot {
+                width: 8px; height: 8px;
+                background: #4ade80;
+                border-radius: 50%;
+                animation: pulse 2s infinite;
+              }
+              @keyframes pulse {
+                0%,100% { opacity: 1; }
+                50% { opacity: 0.4; }
+              }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="badge">&#x2601; AWS VPC Lab</div>
+              <h1 id="student-name">YOUR_STUDENT_NAME</h1>
+              <p class="lab-name" id="lab-name">YOUR_LAB_NAME</p>
+              <hr class="divider"/>
+              <div class="meta-grid">
+                <div class="meta-item">
+                  <div class="meta-label">Instance ID</div>
+                  <div class="meta-value" id="instance-id">loading...</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label">Availability Zone</div>
+                  <div class="meta-value" id="az">loading...</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label">Private IP</div>
+                  <div class="meta-value" id="local-ip">loading...</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label">Public IP</div>
+                  <div class="meta-value" id="public-ip">loading...</div>
+                </div>
+              </div>
+              <div class="status">
+                <div class="dot"></div>
+                Apache running · Web Tier · AZ-1
+              </div>
+            </div>
+            <script>
+              // Values injected by sed after metadata fetch
+              document.getElementById('student-name').textContent = 'STUDENT_NAME_PLACEHOLDER';
+              document.getElementById('lab-name').textContent = 'LAB_NAME_PLACEHOLDER';
+              document.getElementById('instance-id').textContent = 'INSTANCE_ID_PLACEHOLDER';
+              document.getElementById('az').textContent = 'AZ_PLACEHOLDER';
+              document.getElementById('local-ip').textContent = 'LOCAL_IP_PLACEHOLDER';
+              document.getElementById('public-ip').textContent = 'PUBLIC_IP_PLACEHOLDER';
+            </script>
+          </body>
+          </html>
+          HTMLEOF
+
+          # Inject real values using sed (placeholders set above)
+          sed -i "s/STUDENT_NAME_PLACEHOLDER/${StudentName}/g" /var/www/html/index.html
+          sed -i "s/LAB_NAME_PLACEHOLDER/${LabName}/g" /var/www/html/index.html
+          sed -i "s/INSTANCE_ID_PLACEHOLDER/$INSTANCE_ID/g" /var/www/html/index.html
+          sed -i "s/AZ_PLACEHOLDER/$AZ/g" /var/www/html/index.html
+          sed -i "s/LOCAL_IP_PLACEHOLDER/$LOCAL_IP/g" /var/www/html/index.html
+          sed -i "s/PUBLIC_IP_PLACEHOLDER/$PUBLIC_IP/g" /var/www/html/index.html
+
+          # Enable and start Apache
+          systemctl enable httpd
+          systemctl start httpd
+
+          echo "=== Web Server AZ-1 setup complete ==="
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-web-server-az1"
+      - Key: Tier
+        Value: WebTier
+      - Key: AZ
+        Value: AZ1
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # ---- Web Server — AZ 2 ----
+  WebInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet2
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+      - !Ref WebTierSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
+
+          dnf update -y
+          dnf install -y httpd
+
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/instance-id)
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          LOCAL_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/local-ipv4)
+          PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/public-ipv4)
+
+          cat > /var/www/html/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+            <title>VPC Lab — Web Server</title>
+            <style>
+              @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+              *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+              body {
+                font-family: 'IBM Plex Sans', sans-serif;
+                background: #0a0f1e;
+                color: #e2e8f0;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 2rem;
+              }
+              .card {
+                background: linear-gradient(135deg, #111827 0%, #1e293b 100%);
+                border: 1px solid #334155;
+                border-radius: 16px;
+                padding: 3rem;
+                max-width: 640px;
+                width: 100%;
+                box-shadow: 0 25px 50px rgba(0,0,0,0.5), 0 0 0 1px rgba(16,185,129,0.1);
+              }
+              .badge {
+                display: inline-block;
+                background: #059669;
+                color: #d1fae5;
+                font-family: 'Space Mono', monospace;
+                font-size: 0.7rem;
+                letter-spacing: 0.15em;
+                text-transform: uppercase;
+                padding: 0.3rem 0.8rem;
+                border-radius: 999px;
+                margin-bottom: 1.5rem;
+              }
+              h1 {
+                font-family: 'Space Mono', monospace;
+                font-size: 1.6rem;
+                font-weight: 700;
+                color: #fff;
+                line-height: 1.2;
+                margin-bottom: 0.5rem;
+              }
+              .lab-name {
+                color: #34d399;
+                font-size: 1rem;
+                font-weight: 300;
+                margin-bottom: 2rem;
+              }
+              .divider { border: none; border-top: 1px solid #06462a33; margin: 1.5rem 0; }
+              .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+              .meta-item {
+                background: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                padding: 0.75rem 1rem;
+              }
+              .meta-label {
+                font-family: 'Space Mono', monospace;
+                font-size: 0.65rem;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                color: #64748b;
+                margin-bottom: 0.25rem;
+              }
+              .meta-value {
+                font-family: 'Space Mono', monospace;
+                font-size: 0.85rem;
+                color: #38bdf8;
+                word-break: break-all;
+              }
+              .status {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                margin-top: 1.5rem;
+                color: #4ade80;
+                font-size: 0.85rem;
+              }
+              .dot { width: 8px; height: 8px; background: #4ade80; border-radius: 50%; animation: pulse 2s infinite; }
+              @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="badge">&#x2601; AWS VPC Lab</div>
+              <h1 id="student-name">YOUR_STUDENT_NAME</h1>
+              <p class="lab-name" id="lab-name">YOUR_LAB_NAME</p>
+              <hr class="divider"/>
+              <div class="meta-grid">
+                <div class="meta-item">
+                  <div class="meta-label">Instance ID</div>
+                  <div class="meta-value" id="instance-id">loading...</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label">Availability Zone</div>
+                  <div class="meta-value" id="az">loading...</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label">Private IP</div>
+                  <div class="meta-value" id="local-ip">loading...</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label">Public IP</div>
+                  <div class="meta-value" id="public-ip">loading...</div>
+                </div>
+              </div>
+              <div class="status">
+                <div class="dot"></div>
+                Apache running · Web Tier · AZ-2
+              </div>
+            </div>
+            <script>
+              document.getElementById('student-name').textContent = 'STUDENT_NAME_PLACEHOLDER';
+              document.getElementById('lab-name').textContent = 'LAB_NAME_PLACEHOLDER';
+              document.getElementById('instance-id').textContent = 'INSTANCE_ID_PLACEHOLDER';
+              document.getElementById('az').textContent = 'AZ_PLACEHOLDER';
+              document.getElementById('local-ip').textContent = 'LOCAL_IP_PLACEHOLDER';
+              document.getElementById('public-ip').textContent = 'PUBLIC_IP_PLACEHOLDER';
+            </script>
+          </body>
+          </html>
+          HTMLEOF
+
+          sed -i "s/STUDENT_NAME_PLACEHOLDER/${StudentName}/g" /var/www/html/index.html
+          sed -i "s/LAB_NAME_PLACEHOLDER/${LabName}/g" /var/www/html/index.html
+          sed -i "s/INSTANCE_ID_PLACEHOLDER/$INSTANCE_ID/g" /var/www/html/index.html
+          sed -i "s/AZ_PLACEHOLDER/$AZ/g" /var/www/html/index.html
+          sed -i "s/LOCAL_IP_PLACEHOLDER/$LOCAL_IP/g" /var/www/html/index.html
+          sed -i "s/PUBLIC_IP_PLACEHOLDER/$PUBLIC_IP/g" /var/www/html/index.html
+
+          systemctl enable httpd
+          systemctl start httpd
+
+          echo "=== Web Server AZ-2 setup complete ==="
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-web-server-az2"
+      - Key: Tier
+        Value: WebTier
+      - Key: AZ
+        Value: AZ2
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # 10. EC2 INSTANCES — App Tier (Private, no Apache)
+
+  # ---- App Server — AZ 1 ----
+  AppInstance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnet1 # Private subnet — no public IP
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+      - !Ref AppTierSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # ============================================================
+          # User Data Script — App Server AZ-1 (Private)
+          # Minimal setup; SSM agent is pre-installed on Amazon Linux 2023
+          # ============================================================
+          set -euxo pipefail
+          exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
+
+          dnf update -y
+
+          # Verify SSM agent is running (it starts automatically on AL2023)
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+
+          echo "=== App Server AZ-1 setup complete. Access via SSM Session Manager only. ==="
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-app-server-az1"
+      - Key: Tier
+        Value: AppTier
+      - Key: AZ
+        Value: AZ1
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  # ---- App Server — AZ 2 ----
+  AppInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnet2
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+      - !Ref AppTierSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
+
+          dnf update -y
+
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+
+          echo "=== App Server AZ-2 setup complete. Access via SSM Session Manager only. ==="
+      Tags:
+      - Key: Name
+        Value: !Sub "${ProjectTag}-app-server-az2"
+      - Key: Tier
+        Value: AppTier
+      - Key: AZ
+        Value: AZ2
+      - Key: Project
+        Value: !Ref ProjectTag
+
+# OUTPUTS — Values displayed in the CloudFormation console after deployment
+Outputs:
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${ProjectTag}-vpc-id"
+
+  PublicSubnet1Id:
+    Description: Public Subnet AZ-1 ID
+    Value: !Ref PublicSubnet1
+
+  PublicSubnet2Id:
+    Description: Public Subnet AZ-2 ID
+    Value: !Ref PublicSubnet2
+
+  PrivateSubnet1Id:
+    Description: Private Subnet AZ-1 ID
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2Id:
+    Description: Private Subnet AZ-2 ID
+    Value: !Ref PrivateSubnet2
+
+  NatGateway1EIP:
+    Description: Elastic IP of NAT Gateway AZ-1
+    Value: !Ref NatGateway1EIP
+
+  NatGateway2EIP:
+    Description: Elastic IP of NAT Gateway AZ-2
+    Value: !Ref NatGateway2EIP
+
+  WebServer1PublicIP:
+    Description: Public IP of Web Server AZ-1 — open in browser to validate Apache
+    Value: !GetAtt WebInstance1.PublicIp
+
+  WebServer2PublicIP:
+    Description: Public IP of Web Server AZ-2 — open in browser to validate Apache
+    Value: !GetAtt WebInstance2.PublicIp
+
+  WebServer1PrivateIP:
+    Description: Private IP of Web Server AZ-1
+    Value: !GetAtt WebInstance1.PrivateIp
+
+  WebServer2PrivateIP:
+    Description: Private IP of Web Server AZ-2
+    Value: !GetAtt WebInstance2.PrivateIp
+
+  AppServer1PrivateIP:
+    Description: Private IP of App Server AZ-1
+    Value: !GetAtt AppInstance1.PrivateIp
+
+  AppServer2PrivateIP:
+    Description: Private IP of App Server AZ-2
+    Value: !GetAtt AppInstance2.PrivateIp
+
+  WebServer1URL:
+    Description: HTTP URL for Web Server AZ-1
+    Value: !Sub "http://${WebInstance1.PublicIp}"
+
+  WebServer2URL:
+    Description: HTTP URL for Web Server AZ-2
+    Value: !Sub "http://${WebInstance2.PublicIp}"
+
+  WebInstance1Id:
+    Description: Instance ID for Web Server AZ-1 (use in SSM Session Manager)
+    Value: !Ref WebInstance1
+
+  WebInstance2Id:
+    Description: Instance ID for Web Server AZ-2 (use in SSM Session Manager)
+    Value: !Ref WebInstance2
+
+  AppInstance1Id:
+    Description: Instance ID for App Server AZ-1 (use in SSM Session Manager)
+    Value: !Ref AppInstance1
+
+  AppInstance2Id:
+    Description: Instance ID for App Server AZ-2 (use in SSM Session Manager)
+    Value: !Ref AppInstance2
+
+  SSMAccessNote:
+    Description: How to access instances
+    Value: "Use AWS Systems Manager -> Session Manager. No SSH keys required."
