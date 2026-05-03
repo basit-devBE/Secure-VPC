@@ -360,8 +360,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub "${ProjectTag}-web-sg"
-      GroupDescription: >
-        Web tier SG - allows HTTP from internet and ICMP from within VPC. No SSH. SSM access is handled via VPC endpoints (no inbound port needed).
+      GroupDescription: "Web tier SG - allows HTTP from internet and ICMP from within VPC. No SSH. SSM only."
       VpcId: !Ref VPC
       SecurityGroupIngress:
       # HTTP — allow browsers to reach Apache
@@ -394,8 +393,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub "${ProjectTag}-app-sg"
-      GroupDescription: >
-        App tier SG - allows ICMP from within VPC only. No SSH. No inbound from internet. Outbound through NAT GW only.
+      GroupDescription: "App tier SG - ICMP from VPC only. No SSH. No inbound from internet. Outbound via NAT GW only."
       VpcId: !Ref VPC
       SecurityGroupIngress:
       # ICMP — allow ping from within the VPC only
