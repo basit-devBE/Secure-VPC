@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Highly Available, Secure Multi-AZ VPC Lab Author: [Your Full Name] Lab: AWS VPC High Availability Lab Description: Demonstrates fault-tolerant network design, controlled internet access, and secure EC2 instance management using AWS Systems Manager Session Manager. Spans two Availability Zones with redundant public/private subnets, dual NAT Gateways, Apache web tier, and private application tier. No SSH access — SSM only.
+  Highly Available, Secure Multi-AZ VPC Lab Author: Mohammed Abdul Basit Lab: AWS VPC High Availability Lab Description: Demonstrates fault-tolerant network design, controlled internet access, and secure EC2 instance management using AWS Systems Manager Session Manager. Spans two Availability Zones with redundant public/private subnets, dual NAT Gateways, Apache web tier, and private application tier. No SSH access — SSM only.
 
 # METADATA — CloudFormation Console UI Grouping
 Metadata:
@@ -943,11 +943,11 @@ Outputs:
 
   NatGateway1EIP:
     Description: Elastic IP of NAT Gateway AZ-1
-    Value: !Ref NatGateway1EIP
+    Value: !GetAtt NatGateway1EIP.PublicIp
 
   NatGateway2EIP:
     Description: Elastic IP of NAT Gateway AZ-2
-    Value: !Ref NatGateway2EIP
+    Value: !GetAtt NatGateway2EIP.PublicIp
 
   WebServer1PublicIP:
     Description: Public IP of Web Server AZ-1 — open in browser to validate Apache
